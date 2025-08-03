@@ -2,6 +2,9 @@ import { registerPlugin } from '@capacitor/core';
 import { EventEmitter } from 'tseep';
 import runDataService, { ACTIVITY_TYPES } from './RunDataService';
 import { filterLocation } from '../utils/runCalculations';
+import { KalmanFilter1D, WeightedGPSFilter } from '../utils/kalmanFilter';
+import { SensorFusionManager } from '../utils/sensorFusion';
+import { GPSGapFiller } from '../utils/trajectoryPrediction';
 
 const BackgroundGeolocation = registerPlugin('BackgroundGeolocation');
 
@@ -66,6 +69,25 @@ class RunTracker extends EventEmitter {
     this.timerInterval = null; // For updating duration every second
     this.paceInterval = null; // For calculating pace at regular intervals
     this.smoothedSpeedMps = 0; // For smoothing speed calculations in cycling mode
+    
+    // Initialize Kalman filters for GPS smoothing
+    this.latFilter = new KalmanFilter1D({ Q: 3, R: 0.01 });
+    this.lonFilter = new KalmanFilter1D({ Q: 3, R: 0.01 });
+    this.altFilter = new KalmanFilter1D({ Q: 1, R: 0.05 }); // Altitude is less accurate
+    
+    // Alternative: Weighted GPS filter
+    this.weightedFilter = new WeightedGPSFilter(5);
+    
+    // GPS filtering mode (can be configured via settings)
+    this.gpsFilteringMode = localStorage.getItem('gpsFilteringMode') || 'kalman'; // 'kalman' or 'weighted'
+    
+    // Sensor fusion for improved tracking
+    this.sensorFusion = new SensorFusionManager();
+    this.lastGPSTime = 0;
+    this.gpsOutageThreshold = 10000; // 10 seconds without GPS = outage
+    
+    // GPS gap filling with trajectory prediction
+    this.gpsGapFiller = new GPSGapFiller();
   }
 
   // Helper method to get the current distance unit from localStorage
@@ -201,6 +223,13 @@ class RunTracker extends EventEmitter {
       return;
     }
 
+    // Filter out positions with poor GPS accuracy (> 20 meters)
+    const accuracy = newPosition.accuracy ?? newPosition.coords?.accuracy ?? 999;
+    if (accuracy > 20) {
+      console.log(`Position filtered: poor accuracy (${accuracy}m)`);
+      return;
+    }
+
     // Normalise the incoming position so it always has a `coords` object – this is
     // the shape expected by the shared helper utilities (runCalculations etc.)
     const standardise = (pos) => ({
@@ -216,9 +245,78 @@ class RunTracker extends EventEmitter {
 
     const currentPositionStd = standardise(newPosition);
 
+    // Validate coordinates are within valid ranges
+    const lat = currentPositionStd.coords.latitude;
+    const lon = currentPositionStd.coords.longitude;
+    if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      console.log(`Position filtered: invalid coordinates (${lat}, ${lon})`);
+      return;
+    }
+
+    // Apply GPS filtering based on selected mode
+    let filteredPosition = currentPositionStd;
+    
+    if (this.gpsFilteringMode === 'kalman') {
+      // Adjust Kalman filter parameters based on GPS accuracy
+      this.latFilter.adjustParameters(accuracy);
+      this.lonFilter.adjustParameters(accuracy);
+      
+      // Adjust process noise based on activity type
+      if (this.activityType === ACTIVITY_TYPES.WALK) {
+        // Walking - lower process noise
+        this.latFilter.Q = 0.5;
+        this.lonFilter.Q = 0.5;
+      } else if (this.activityType === ACTIVITY_TYPES.CYCLE) {
+        // Cycling - higher process noise due to faster movement
+        this.latFilter.Q = 5;
+        this.lonFilter.Q = 5;
+      } else {
+        // Running - moderate process noise
+        this.latFilter.Q = 3;
+        this.lonFilter.Q = 3;
+      }
+      
+      // Apply Kalman filtering
+      const filteredLat = this.latFilter.filter(lat);
+      const filteredLon = this.lonFilter.filter(lon);
+      const filteredAlt = currentPositionStd.coords.altitude !== null && currentPositionStd.coords.altitude !== undefined
+        ? this.altFilter.filter(currentPositionStd.coords.altitude)
+        : null;
+      
+      filteredPosition = {
+        ...currentPositionStd,
+        coords: {
+          ...currentPositionStd.coords,
+          latitude: filteredLat,
+          longitude: filteredLon,
+          altitude: filteredAlt
+        }
+      };
+    } else if (this.gpsFilteringMode === 'weighted') {
+      // Use weighted average filter
+      const weightedResult = this.weightedFilter.addReading({
+        lat: lat,
+        lon: lon,
+        accuracy: accuracy,
+        timestamp: currentPositionStd.timestamp
+      });
+      
+      if (weightedResult) {
+        filteredPosition = {
+          ...currentPositionStd,
+          coords: {
+            ...currentPositionStd.coords,
+            latitude: weightedResult.lat,
+            longitude: weightedResult.lon,
+            accuracy: weightedResult.accuracy
+          }
+        };
+      }
+    }
+
     // Keep duration accurate even when JS timers are throttled in background.
     // Uses GPS timestamp so splits don\'t get 0:00 durations.
-    this.duration = (currentPositionStd.timestamp - this.startTime - this.pausedTime) / 1000;
+    this.duration = (filteredPosition.timestamp - this.startTime - this.pausedTime) / 1000;
     this.emit('durationChange', this.duration);
 
     if (this.positions.length > 0) {
@@ -227,7 +325,7 @@ class RunTracker extends EventEmitter {
 
       // Use the shared filtering logic to decide whether to accept the point.
       // If the point fails the quality checks, we ignore it entirely.
-      if (!filterLocation(currentPositionStd, lastPositionStd)) {
+      if (!filterLocation(filteredPosition, lastPositionStd)) {
         console.log('[RunTracker] Position rejected by quality filter');
         return;
       }
@@ -235,8 +333,8 @@ class RunTracker extends EventEmitter {
       const distanceIncrement = this.calculateDistance(
         lastRawPosition.latitude,
         lastRawPosition.longitude,
-        newPosition.latitude,
-        newPosition.longitude
+        filteredPosition.coords.latitude,
+        filteredPosition.coords.longitude
       );
 
       // Minimum threshold to additionally smooth out micro-jitter.
@@ -263,8 +361,8 @@ class RunTracker extends EventEmitter {
       }
 
       // Check for altitude data and update elevation
-      if (newPosition.altitude !== undefined && newPosition.altitude !== null) {
-        this.updateElevation(newPosition.altitude);
+      if (filteredPosition.coords.altitude !== undefined && filteredPosition.coords.altitude !== null) {
+        this.updateElevation(filteredPosition.coords.altitude);
       }
 
       // Get current distance unit
@@ -319,7 +417,32 @@ class RunTracker extends EventEmitter {
       }
     }
 
-    this.positions.push(currentPositionStd);
+    // Store the filtered position
+    this.positions.push({
+      latitude: filteredPosition.coords.latitude,
+      longitude: filteredPosition.coords.longitude,
+      altitude: filteredPosition.coords.altitude,
+      accuracy: filteredPosition.coords.accuracy,
+      timestamp: filteredPosition.timestamp,
+      coords: filteredPosition.coords
+    });
+    
+    // Update sensor fusion with GPS position
+    this.sensorFusion.updateGPSPosition(
+      filteredPosition.coords.latitude,
+      filteredPosition.coords.longitude,
+      null // heading not available from GPS alone
+    );
+    
+    // Update GPS gap filler with real position
+    this.gpsGapFiller.processPosition({
+      lat: filteredPosition.coords.latitude,
+      lon: filteredPosition.coords.longitude,
+      timestamp: filteredPosition.timestamp,
+      accuracy: filteredPosition.coords.accuracy
+    });
+    
+    this.lastGPSTime = filteredPosition.timestamp;
   }
 
   startTimer() {
@@ -385,6 +508,87 @@ class RunTracker extends EventEmitter {
         }
       }
     }, 1000); // Update pace/speed every 1 second for more responsive cycling
+    
+    // Start adaptive sampling updater
+    this.startAdaptiveSampling();
+    
+    // Start GPS outage detection
+    this.startGPSOutageDetection();
+  }
+
+  /**
+   * Start adaptive GPS sampling rate updates
+   */
+  startAdaptiveSampling() {
+    // Update sampling rate every 30 seconds
+    this.adaptiveSamplingInterval = setInterval(() => {
+      if (this.isTracking && !this.isPaused) {
+        this.updateGpsSamplingRate();
+      }
+    }, 30000);
+  }
+
+  /**
+   * Start GPS outage detection and sensor fusion fallback
+   */
+  startGPSOutageDetection() {
+    this.gpsOutageInterval = setInterval(() => {
+      if (this.isTracking && !this.isPaused) {
+        const now = Date.now();
+        const timeSinceLastGPS = now - this.lastGPSTime;
+        
+        // Check if we're in a GPS outage
+        if (timeSinceLastGPS > this.gpsOutageThreshold && this.lastGPSTime > 0) {
+          console.log('GPS outage detected, using gap filling');
+          
+          // Try trajectory prediction first
+          const predictedPosition = this.gpsGapFiller.fillGap();
+          
+          if (predictedPosition && predictedPosition.confidence > 0.5) {
+            // Use trajectory prediction
+            const syntheticPosition = {
+              coords: {
+                latitude: predictedPosition.lat,
+                longitude: predictedPosition.lon,
+                accuracy: 25 / predictedPosition.confidence,
+                altitude: null
+              },
+              timestamp: now,
+              isPredicted: true
+            };
+            
+            this.addPosition(syntheticPosition);
+            console.log(`Trajectory prediction: ${predictedPosition.lat.toFixed(6)}, ${predictedPosition.lon.toFixed(6)} (confidence: ${predictedPosition.confidence.toFixed(2)})`);
+          } else {
+            // Fall back to sensor fusion
+            const estimatedPosition = this.sensorFusion.getEstimatedPosition();
+            
+            if (estimatedPosition && estimatedPosition.confidence > 0.3) {
+              const syntheticPosition = {
+                coords: {
+                  latitude: estimatedPosition.lat,
+                  longitude: estimatedPosition.lon,
+                  accuracy: 50 / estimatedPosition.confidence,
+                  altitude: null
+                },
+                timestamp: now,
+                isEstimated: true
+              };
+              
+              this.addPosition(syntheticPosition);
+              console.log(`Sensor fusion fallback: ${estimatedPosition.lat.toFixed(6)}, ${estimatedPosition.lon.toFixed(6)} (confidence: ${estimatedPosition.confidence.toFixed(2)})`);
+            }
+          }
+        }
+        
+        // Activity classification for adaptive behavior
+        const activity = this.sensorFusion.getCurrentActivity();
+        if (activity.confidence > 0.7 && activity.activity !== 'unknown') {
+          // Could adjust tracking parameters based on detected activity
+          console.log(`Detected activity: ${activity.activity} (${(activity.confidence * 100).toFixed(0)}% confidence)`);
+        }
+      }
+    }, 5000); // Check every 5 seconds
   }
 
   /**
@@ -422,6 +626,100 @@ class RunTracker extends EventEmitter {
     }
   }
 
+  /**
+   * Calculate optimal GPS sampling interval based on multiple factors
+   * Implements adaptive sampling for battery optimization
+   * @returns {number} Interval in milliseconds
+   */
+  calculateOptimalSamplingInterval() {
+    // Base intervals by activity type
+    let baseInterval;
+    if (this.activityType === ACTIVITY_TYPES.WALK) {
+      baseInterval = 15000; // 15 seconds for walking
+    } else if (this.activityType === ACTIVITY_TYPES.CYCLE) {
+      baseInterval = 5000; // 5 seconds for cycling
+    } else {
+      baseInterval = 10000; // 10 seconds for running
+    }
+
+    // Speed-based adjustment
+    const speedMps = this.calculateCurrentSpeed();
+    if (speedMps > 15) {
+      // High speed (>54 km/h) - more frequent updates
+      baseInterval = Math.min(baseInterval, 5000);
+    } else if (speedMps > 8) {
+      // Medium speed (>28.8 km/h) - moderate frequency
+      baseInterval = Math.min(baseInterval, 10000);
+    } else if (speedMps < 0.5) {
+      // Nearly stationary - reduce frequency
+      baseInterval = Math.max(baseInterval, 30000);
+    }
+
+    // Battery level adjustment
+    const batteryLevel = this.getBatteryLevel();
+    if (batteryLevel !== null && batteryLevel < 30) {
+      // Low battery - increase interval by 50%
+      baseInterval = baseInterval * 1.5;
+    } else if (batteryLevel !== null && batteryLevel < 15) {
+      // Critical battery - double interval
+      baseInterval = baseInterval * 2;
+    }
+
+    // Distance to goal adjustment
+    if (this.distanceGoal) {
+      const remainingDistance = this.distanceGoal - this.distance;
+      if (remainingDistance < 1000) {
+        // Within 1km of goal - more frequent updates
+        baseInterval = Math.min(baseInterval, 5000);
+      }
+    }
+
+    // Screen state adjustment (PWA can detect if page is visible)
+    if (typeof document !== 'undefined' && document.hidden) {
+      // App is in background - reduce frequency
+      baseInterval = Math.max(baseInterval, 30000);
+    }
+
+    // Return clamped interval (min 3s, max 60s)
+    return Math.max(3000, Math.min(60000, baseInterval));
+  }
+
+  /**
+   * Get current battery level (0-100)
+   * @returns {number|null} Battery percentage or null if unavailable
+   */
+  getBatteryLevel() {
+    // Check if Battery API is available
+    if ('getBattery' in navigator) {
+      return navigator.getBattery().then(battery => {
+        return Math.round(battery.level * 100);
+      }).catch(() => null);
+    }
+    return null;
+  }
+
+  /**
+   * Update GPS sampling configuration dynamically
+   */
+  async updateGpsSamplingRate() {
+    if (!this.watchId || !this.isTracking) return;
+
+    const optimalInterval = this.calculateOptimalSamplingInterval();
+    
+    try {
+      // Update the existing watcher with new interval
+      await BackgroundGeolocation.configure({
+        id: this.watchId,
+        interval: optimalInterval,
+        fastestInterval: optimalInterval
+      });
+      
+      console.log(`GPS sampling interval updated to ${optimalInterval}ms`);
+    } catch (error) {
+      console.warn('Failed to update GPS sampling rate:', error);
+    }
+  }
+
   async startTracking() {
     try {
       // We should have already requested permissions by this point
@@ -430,6 +728,44 @@ class RunTracker extends EventEmitter {
       if (!permissionsGranted) {
         console.warn('Attempting to start tracking without permissions. This should not happen.');
         return;
+      }
+
+      // Additional safety check: verify actual system permissions if possible
+      try {
+        // This will help catch cases where localStorage is out of sync with actual permissions
+        await BackgroundGeolocation.addWatcher(
+          {
+            id: 'permission_test_' + Date.now(),
+            requestPermissions: false,
+            backgroundMessage: 'Testing permissions...',
+            backgroundTitle: 'Runstr',
+            highAccuracy: true,
+            distanceFilter: 999999, // Very high to avoid actual location updates
+            interval: 600000, // 10 minutes - won't actually fire
+          },
+          (location, error) => {
+            if (error && (error.code === 'NOT_AUTHORIZED' || error.message?.includes('permission'))) {
+              console.warn('Permission check failed, updating localStorage');
+              localStorage.setItem('permissionsGranted', 'false');
+              this.emit('permissionError', error);
+            }
+          }
+        );
+        // Clean up the test watcher immediately
+        setTimeout(async () => {
+          try {
+            await BackgroundGeolocation.removeWatcher({ id: 'permission_test_' + (Date.now() - 100) });
+          } catch (e) {
+            // Ignore cleanup errors for test watcher
+          }
+        }, 100);
+      } catch (permissionTestError) {
+        console.warn('Permission validation failed:', permissionTestError);
+        if (permissionTestError.message?.includes('permission')) {
+          localStorage.setItem('permissionsGranted', 'false');
+          this.emit('permissionError', permissionTestError);
+          return;
+        }
       }
       
       // First, ensure any existing watchers are cleaned up
@@ -530,6 +866,39 @@ class RunTracker extends EventEmitter {
     }
   }
 
+  stopTracking() {
+    this.cleanupWatchers();
+    
+    // Stop sensor fusion
+    this.sensorFusion.stopTracking();
+  }
+
+  stopTimer() {
+    if (this.timerInterval) {
+      clearInterval(this.timerInterval);
+      this.timerInterval = null;
+    }
+  }
+
+  stopPaceCalculator() {
+    if (this.paceInterval) {
+      clearInterval(this.paceInterval);
+      this.paceInterval = null;
+    }
+    
+    // Stop adaptive sampling updates
+    if (this.adaptiveSamplingInterval) {
+      clearInterval(this.adaptiveSamplingInterval);
+      this.adaptiveSamplingInterval = null;
+    }
+    
+    // Stop GPS outage detection
+    if (this.gpsOutageInterval) {
+      clearInterval(this.gpsOutageInterval);
+      this.gpsOutageInterval = null;
+    }
+  }
+
   async start() {
     if (this.isTracking && !this.isPaused) return;
     
@@ -557,6 +926,30 @@ class RunTracker extends EventEmitter {
       loss: 0,
       lastAltitude: null
     };
+    
+    // Reset GPS filters
+    this.latFilter.reset();
+    this.lonFilter.reset();
+    this.altFilter.reset();
+    this.weightedFilter.reset();
+    
+    // Reset GPS gap filler
+    this.gpsGapFiller.reset();
+    
+    // Initialize and start sensor fusion
+    this.sensorFusion.initialize().then(() => {
+      this.sensorFusion.startTracking();
+      
+      // Set up step detection callback
+      this.sensorFusion.onStepDetected(() => {
+        if (this.activityType === ACTIVITY_TYPES.WALK) {
+          this.estimatedSteps++;
+          this.emit('stepsChange', this.estimatedSteps);
+        }
+      });
+    }).catch(err => {
+      console.warn('Sensor fusion initialization failed:', err);
+    });
 
     // Hold a partial CPU wake-lock so the OS doesn't suspend GPS callbacks (released in stop())
     try {

@@ -51,8 +51,126 @@ self.addEventListener('message', (event) => {
     // Do not try to stop tracking in background - handled by Capacitor plugin
   } else if (event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
+  } else if (event.data.type === 'SYNC_RUN_DATA') {
+    // Queue run data for background sync
+    event.waitUntil(queueRunDataForSync(event.data.payload));
   }
 });
+
+// Background Sync for run data
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'run-data-sync') {
+    event.waitUntil(syncQueuedRunData());
+  } else if (event.tag === 'location-sync') {
+    event.waitUntil(syncLocationData());
+  }
+});
+
+// Periodic Background Sync (limited support)
+self.addEventListener('periodicsync', (event) => {
+  if (event.tag === 'location-sync') {
+    event.waitUntil(periodicLocationSync());
+  }
+});
+
+// Queue run data for background sync
+async function queueRunDataForSync(runData) {
+  try {
+    const cache = await caches.open('run-data-queue');
+    const queueKey = `run-${Date.now()}-${Math.random()}`;
+    await cache.put(queueKey, new Response(JSON.stringify(runData)));
+    
+    // Register for background sync
+    await self.registration.sync.register('run-data-sync');
+    console.log('Run data queued for background sync');
+  } catch (error) {
+    console.error('Failed to queue run data:', error);
+  }
+}
+
+// Sync queued run data when connection is restored
+async function syncQueuedRunData() {
+  try {
+    const cache = await caches.open('run-data-queue');
+    const requests = await cache.keys();
+    
+    for (const request of requests) {
+      try {
+        const response = await cache.match(request);
+        const runData = await response.json();
+        
+        // Attempt to publish run data to Nostr relays
+        const success = await publishRunDataToNostr(runData);
+        
+        if (success) {
+          // Remove from queue if successful
+          await cache.delete(request);
+          console.log('Run data synced successfully');
+        }
+      } catch (error) {
+        console.error('Failed to sync run data:', error);
+        // Keep in queue for retry
+      }
+    }
+  } catch (error) {
+    console.error('Background sync failed:', error);
+  }
+}
+
+// Publish run data to Nostr (simplified for service worker context)
+async function publishRunDataToNostr(runData) {
+  // This would need to be a simplified version of the Nostr publishing logic
+  // due to service worker limitations
+  try {
+    const response = await fetch('/api/sync-run', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(runData)
+    });
+    
+    return response.ok;
+  } catch (error) {
+    console.error('Failed to publish run data:', error);
+    return false;
+  }
+}
+
+// Sync location data
+async function syncLocationData() {
+  try {
+    if ('geolocation' in navigator) {
+      const position = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: false,
+          timeout: 15000,
+          maximumAge: 300000 // 5 minutes
+        });
+      });
+      
+      // Store location for when app resumes
+      const cache = await caches.open('location-cache');
+      await cache.put('last-location', new Response(JSON.stringify({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        timestamp: Date.now()
+      })));
+      
+      console.log('Location synced in background');
+      return true;
+    }
+  } catch (error) {
+    console.error('Background location sync failed:', error);
+    return false;
+  }
+}
+
+// Periodic location sync (very limited browser support)
+async function periodicLocationSync() {
+  console.log('Periodic location sync triggered');
+  return await syncLocationData();
+}
 
 // Improved fetch handler with cache strategies
 self.addEventListener('fetch', (event) => {
