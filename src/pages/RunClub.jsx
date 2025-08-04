@@ -246,7 +246,7 @@ export const RunClub = () => {
   return (
     <div className="runclub-container">
       {/* Phase 7: Enhanced development debug tools */}
-      {process.env.NODE_ENV === 'development' && (
+      {(import.meta.env.DEV || (typeof process !== 'undefined' && process.env.NODE_ENV === 'development')) && (
         <div style={{ position: 'fixed', top: '80px', right: '10px', zIndex: 1000 }}>
           <button 
             onClick={hardRefresh}

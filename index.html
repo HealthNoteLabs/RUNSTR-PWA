@@ -18,8 +18,20 @@
     <meta name="apple-mobile-web-app-title" content="Runstr" />
     <title>Runstr</title>
     
-    <!-- Tailwind CSS CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tailwind CSS CDN with cache busting and development config -->
+    <script src="https://cdn.tailwindcss.com?v=3.4.0"></script>
+    <script>
+      // Suppress Tailwind CDN warning in development
+      if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+        const originalWarn = console.warn;
+        console.warn = (...args) => {
+          if (args[0] && args[0].includes && args[0].includes('cdn.tailwindcss.com should not be used in production')) {
+            return; // Suppress this specific warning in development
+          }
+          originalWarn.apply(console, args);
+        };
+      }
+    </script>
     
     <!-- DNS Prefetch and Preconnect -->
     <link rel="dns-prefetch" href="https://nostr.band">
@@ -27,9 +39,14 @@
     <link rel="dns-prefetch" href="https://wavlake.com">
     <link rel="preconnect" href="https://wavlake.com" crossorigin>
     
-    <!-- Preload critical assets -->
-    <link rel="preload" href="/src/App.css" as="style">
-    <link rel="preload" href="/src/index.css" as="style">
+    <!-- Preload critical assets with cache busting -->
+    <link rel="preload" href="/src/App.css?v=1.0.5" as="style">
+    <link rel="preload" href="/src/index.css?v=1.0.5" as="style">
+    
+    <!-- Prevent aggressive caching during development -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     
     <!-- Critical CSS for initial render -->
     <style>
@@ -128,13 +145,25 @@
     
     <script 
       defer
-      src='https://www.unpkg.com/nostr-login@latest/dist/unpkg.js' 
+      src='https://www.unpkg.com/nostr-login@latest/dist/unpkg.js?v=2024.1' 
       data-perms="get_public_key,sign_event:0" 
-      data-relays="wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band,wss://relay.snort.social,wss://purplepag.es,wss://relayable.org,wss://nostr.wine,wss://groups.0xchat.com"
+      data-relays="wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
       data-theme="purple"
       data-title="RUNSTR"
       data-description="Track your runs and connect with runners on Nostr"
+      onerror="console.error('nostr-login failed to load, continuing without it');"
     ></script>
+    
+    <!-- Add timeout fallback for nostr-login -->
+    <script>
+      // Prevent nostr-login from blocking app initialization
+      setTimeout(() => {
+        if (!window.nostrLogin && !window.__NOSTR_LOGIN_TIMEOUT__) {
+          window.__NOSTR_LOGIN_TIMEOUT__ = true;
+          console.warn('nostr-login timeout - continuing app initialization');
+        }
+      }, 10000); // 10 second timeout
+    </script>
   </head>
   <body>
     <div id="root">
@@ -145,23 +174,26 @@
       // Optimize service worker for better Android performance
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js', { 
-            scope: '/',
-            updateViaCache: 'none' // Always check for updates
-          })
-          .then(registration => {
-            // Check for updates on page load
-            registration.update();
-            console.log('SW registered:', registration);
-          })
-          .catch(error => {
-            console.log('SW registration failed:', error);
-          });
-          
-          // Periodically check for updates
-          setInterval(() => {
-            navigator.serviceWorker.ready.then(registration => registration.update());
-          }, 3600000); // Check every hour
+          // Add delay for browser to ensure app loads first
+          setTimeout(() => {
+            navigator.serviceWorker.register('/sw.js', { 
+              scope: '/',
+              updateViaCache: 'none' // Always check for updates
+            })
+            .then(registration => {
+              // Check for updates on page load
+              registration.update();
+              console.log('SW registered:', registration);
+            })
+            .catch(error => {
+              console.log('SW registration failed:', error);
+            });
+            
+            // Periodically check for updates
+            setInterval(() => {
+              navigator.serviceWorker.ready.then(registration => registration.update());
+            }, 3600000); // Check every hour
+          }, 2000); // Delay service worker registration by 2 seconds
         });
       }
       

@@ -1,4 +1,4 @@
-import { registerPlugin } from '@capacitor/core';
+import { registerPlugin, Capacitor } from '@capacitor/core';
 import { EventEmitter } from 'tseep';
 import runDataService, { ACTIVITY_TYPES } from './RunDataService';
 import { filterLocation } from '../utils/runCalculations';
@@ -6,7 +6,24 @@ import { KalmanFilter1D, WeightedGPSFilter } from '../utils/kalmanFilter';
 import { SensorFusionManager } from '../utils/sensorFusion';
 import { GPSGapFiller } from '../utils/trajectoryPrediction';
 
-const BackgroundGeolocation = registerPlugin('BackgroundGeolocation');
+// Browser-compatible fallback for Capacitor plugins
+const BackgroundGeolocation = Capacitor.isNativePlatform() 
+  ? registerPlugin('BackgroundGeolocation')
+  : {
+      // Mock implementation for browser development
+      addListener: () => ({ remove: () => {} }),
+      start: () => Promise.resolve(),
+      stop: () => Promise.resolve(),
+      getCurrentLocation: () => Promise.resolve({
+        latitude: 37.7749,
+        longitude: -122.4194,
+        accuracy: 10,
+        altitude: 0,
+        bearing: 0,
+        speed: 0,
+        time: Date.now()
+      })
+    };
 
 // Define average stride length for step estimation
 const AVERAGE_STRIDE_LENGTH_METERS = 0.62; // meters (adjusted from 0.73)

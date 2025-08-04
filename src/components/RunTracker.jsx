@@ -19,6 +19,8 @@ import { publishRun } from '../utils/runPublisher';
 import appToast from '../utils/toast';
 
 export const RunTracker = () => {
+  console.log('🏃‍♂️ RunTracker component rendering...');
+  
   const { 
     isTracking,
     isPaused,

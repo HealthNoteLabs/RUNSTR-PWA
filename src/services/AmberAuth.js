@@ -111,7 +111,10 @@ const signEvent = (event) => {
 
 // Check if Amber is installed (will only work in native context)
 const isAmberInstalled = async () => {
-  if (Platform.OS !== 'android') return false;
+  // Check if we're on Android AND in a native app (not browser)
+  if (Platform.OS !== 'android' || (typeof window !== 'undefined' && !window.Capacitor?.isNativePlatform())) {
+    return false;
+  }
   
   try {
     // This will check if the app can handle the nostrsigner: URI scheme

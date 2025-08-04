@@ -1,9 +1,17 @@
 import { useState, useContext, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
 import { NostrContext } from '../contexts/NostrContext';
-import { registerPlugin } from '@capacitor/core';
+import { registerPlugin, Capacitor } from '@capacitor/core';
 
-const BackgroundGeolocation = registerPlugin('BackgroundGeolocation');
+// Browser-compatible fallback for Capacitor plugins
+const BackgroundGeolocation = Capacitor.isNativePlatform() 
+  ? registerPlugin('BackgroundGeolocation')
+  : {
+      // Mock implementation for browser development
+      addWatcher: () => Promise.resolve('mock-watcher-id'),
+      removeWatcher: () => Promise.resolve(),
+      requestPermissions: () => Promise.resolve({ location: 'granted' })
+    };
 
 // Optional battery-optimisation plugin is loaded at runtime so tests / web build won't fail if it's absent
 const ensureBatteryWhitelist = async () => {

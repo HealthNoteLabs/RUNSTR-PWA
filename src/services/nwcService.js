@@ -15,8 +15,8 @@ const DEMO_MODE = false; // set true to bypass real network calls during dev
 const NWC_URI =
   (typeof localStorage !== 'undefined' && localStorage.getItem('fundingNwcUri')) ||
   (typeof import.meta !== 'undefined' && (import.meta?.env?.VITE_NWC_URI || import.meta?.env?.NWC_URI)) ||
-  process.env.VITE_NWC_URI ||
-  process.env.NWC_URI ||
+  (typeof process !== 'undefined' && process.env?.VITE_NWC_URI) ||
+  (typeof process !== 'undefined' && process.env?.NWC_URI) ||
   null; // No hardcoded fallback
 
 if (!NWC_URI) {

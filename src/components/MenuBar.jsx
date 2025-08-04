@@ -5,7 +5,8 @@ import { ActivityModeBanner } from './ActivityModeBanner';
 // import { DashboardWalletHeader } from './DashboardWalletHeader'; // Temporarily disabled - ecash wallet under development
 import { useActivityMode, ACTIVITY_TYPES } from '../contexts/ActivityModeContext';
 import { useSettings } from '../contexts/SettingsContext';
-import rewardsPayoutService from '../services/rewardsPayoutService';
+// FIXED 2025-08-04: Removed rewardsPayoutService import that caused browser loading issues
+// (unused import created dependency chain leading to "process is not defined" error)
 import { testConnection, DEFAULT_SERVERS } from '../lib/blossom';
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";

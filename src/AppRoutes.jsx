@@ -59,7 +59,7 @@ const LoadingComponent = () => (
 );
 
 const AppRoutes = () => {
-  console.log("AppRoutes component is rendering");
+  console.log("📍 AppRoutes component is rendering");
   const [isErrorLogged, setIsErrorLogged] = useState(false);
 
   // Add global error handler to catch any unhandled errors
@@ -76,6 +76,8 @@ const AppRoutes = () => {
       };
     }
   }, [isErrorLogged]);
+  
+  console.log("🛣️ AppRoutes rendering Routes...");
   
   return (
     <Suspense fallback={<LoadingComponent />}>

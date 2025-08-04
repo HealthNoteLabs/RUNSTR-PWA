@@ -2,6 +2,7 @@
 // This runs ONLY in the dev server (import.meta.env.DEV)
 // and is a no-op in production / the built mobile bundle.
 
+// Re-enabled after fixing critical browser compatibility issues
 if (import.meta.env.DEV && typeof window !== 'undefined') {
   /* ------------------------------------------------------------------
      1. Block Vite's own overlay (just in case a plugin re-enables it)
